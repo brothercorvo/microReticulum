@@ -616,6 +616,12 @@ Recall last heard app_data for a destination hash.
 /*static*/ bool Identity::validate_announce(const Packet& packet) {
 	try {
 		if (packet.packet_type() == Type::Packet::ANNOUNCE) {
+			size_t min_announce_size = KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8 + SIGLENGTH/8;
+			if (packet.data().size() < min_announce_size) {
+				WARNING("Identity::validate_announce: packet too small (" + std::to_string(packet.data().size()) + " < " + std::to_string(min_announce_size) + "), dropping");
+				return false;
+			}
+
 			Bytes destination_hash = packet.destination_hash();
 			//TRACE("Identity::validate_announce: destination_hash: " + packet.destination_hash().toHex());
 			Bytes public_key = packet.data().left(KEYSIZE/8);
