@@ -614,8 +614,10 @@ namespace LXMF {
 
 		// Retry backoff
 		double _next_outbound_process_time = 0.0;  // Next time to process outbound queue
-		static constexpr double OUTBOUND_RETRY_DELAY = 5.0;  // Seconds between retries
-		static constexpr double PATH_REQUEST_WAIT = 3.0;     // Seconds to wait after path request
+		static constexpr double OUTBOUND_RETRY_DELAY = 10.0; // Seconds between retries (Python: DELIVERY_RETRY_WAIT = 10)
+		static constexpr double PATH_REQUEST_WAIT = 15.0;    // Seconds to wait after path request (Python: 7s, but LoRa needs more RX window)
+		static constexpr int MAX_DELIVERY_ATTEMPTS = 5;      // Max attempts before failing (Python: 5)
+		static constexpr int MAX_PATHLESS_TRIES = 1;          // Attempts before requesting path (Python: 1)
 
 		// Propagation node support
 		PropagationNodeManager* _propagation_manager = nullptr;

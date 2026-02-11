@@ -199,7 +199,8 @@ const Bytes& LXMessage::pack() {
 
 	// For Phase 1 MVP, we only support DIRECT delivery
 	if (_desired_method == Type::Message::DIRECT) {
-		if (content_size <= Type::Constants::LINK_PACKET_MAX_CONTENT) {
+		// Use LoRa-constrained limit (63 bytes content) to ensure link packets fit within LoRa wire MTU
+		if (content_size <= Type::Constants::LORA_LINK_PACKET_MAX_CONTENT) {
 			_method = Type::Message::DIRECT;
 			_representation = Type::Message::PACKET;
 			INFO("  Message will be sent as single packet (" + std::to_string(_packed.size()) + " bytes)");

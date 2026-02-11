@@ -280,12 +280,20 @@ void Link::prove() {
 	INFO(">>> prove(): entry");
 	DEBUGF("Link %s requesting proof", link_id().toHex().c_str());
 	INFO(">>> prove(): preparing signed_data");
-	Bytes signed_data =_object->_link_id + _object->_pub_bytes + _object->_sig_pub_bytes;
+	// Cap link MTU at interface HW_MTU for constrained interfaces (e.g. LoRa 255 bytes)
+	if (_object->_attached_interface &&
+		(_object->_attached_interface.AUTOCONFIGURE_MTU() || _object->_attached_interface.FIXED_MTU()) &&
+		_object->_attached_interface.HW_MTU() < _object->_mtu) {
+		DEBUGF("Capping link MTU from %d to interface HW_MTU %d", _object->_mtu, _object->_attached_interface.HW_MTU());
+		_object->_mtu = _object->_attached_interface.HW_MTU();
+	}
+	Bytes signalling_bytes = Link::signalling_bytes(_object->_mtu, _object->_mode);
+	Bytes signed_data =_object->_link_id + _object->_pub_bytes + _object->_sig_pub_bytes + signalling_bytes;
 	INFO(">>> prove(): calling identity.sign()");
 	const Bytes signature(_object->_owner.identity().sign(signed_data));
 	INFO(">>> prove(): signature complete, building proof packet");
 
-	Bytes proof_data = signature + _object->_pub_bytes;
+	Bytes proof_data = signature + _object->_pub_bytes + signalling_bytes;
 	// CBA LINK
 	// CBA TODO: Determine which approach is better, passing liunk to packet or passing _link_destination
 	INFO(">>> prove(): creating Packet");
@@ -346,7 +354,7 @@ void Link::validate_proof(const Packet& packet) {
 				handshake();
 
 				_object->_establishment_cost += packet.raw().size();
-				Bytes signed_data = _object->_link_id + _object->_peer_pub_bytes + _object->_peer_sig_pub_bytes;
+				Bytes signed_data = _object->_link_id + _object->_peer_pub_bytes + _object->_peer_sig_pub_bytes + signalling_bytes;
 				const Bytes signature(packet_data.left(Type::Identity::SIGLENGTH/8));
 				
 				TRACEF("Link %s validating identity", link_id().toHex().c_str());
@@ -359,27 +367,35 @@ void Link::validate_proof(const Packet& packet) {
 					_object->__remote_identity = _object->_destination.identity();
 					if (confirmed_mtu) _object->_mtu = confirmed_mtu;
 					else _object->_mtu = RNS::Type::Reticulum::MTU;
+					// Cap link MTU at interface HW_MTU for constrained interfaces (e.g. LoRa 255 bytes)
+					if (_object->_attached_interface &&
+						(_object->_attached_interface.AUTOCONFIGURE_MTU() || _object->_attached_interface.FIXED_MTU()) &&
+						_object->_attached_interface.HW_MTU() < _object->_mtu) {
+						DEBUGF("Capping link MTU from %d to interface HW_MTU %d", _object->_mtu, _object->_attached_interface.HW_MTU());
+						_object->_mtu = _object->_attached_interface.HW_MTU();
+					}
 					update_mdu();
 					_object->_status = Type::Link::ACTIVE;
 					_object->_activated_at = OS::time();
 					_object->_last_proof = _object->_activated_at;
+					// Save a local copy before activate_link, which removes the
+				// link from the pending pool and invalidates *this.
+					Link self(*this);
 					Transport::activate_link(*this);
-					std::string link_str = toString();
-					std::string dest_str = _object->_destination.toString();
-					VERBOSEF("Link %s established with %s, RTT is %f s", link_str.c_str(), dest_str.c_str(), OS::round(_object->_rtt, 3));
-					
-					//p if _object->_rtt != None and _object->_establishment_cost != None and _object->_rtt > 0 and _object->_establishment_cost > 0:
-					if (_object->_rtt != 0.0 && _object->_establishment_cost != 0 && _object->_rtt > 0 and _object->_establishment_cost > 0) {
-						_object->_establishment_rate = _object->_establishment_cost / _object->_rtt;
+					// After activate_link, *this and _object are invalid - use self.
+					VERBOSEF("Link %s established with %s, RTT is %f s",
+						self.toString().c_str(), self.destination().toString().c_str(),
+						OS::round(self._object->_rtt, 3));
+
+					if (self._object->_rtt != 0.0 && self._object->_establishment_cost != 0 && self._object->_rtt > 0 && self._object->_establishment_cost > 0) {
+						self._object->_establishment_rate = self._object->_establishment_cost / self._object->_rtt;
 					}
 
-                    //p rtt_data = umsgpack.packb(self.rtt)
 					MsgPack::Packer packer;
-					packer.serialize(_object->_rtt);
+					packer.serialize(self._object->_rtt);
 					Bytes rtt_data(packer.data(), packer.size());
 TRACEF("***** RTT data size: %d", rtt_data.size());
-                    //p rtt_packet = RNS.Packet(self, rtt_data, context=RNS.Packet.LRRTT)
-					Packet rtt_packet(*this, rtt_data, Type::Packet::DATA, Type::Packet::LRRTT);
+					Packet rtt_packet(self, rtt_data, Type::Packet::DATA, Type::Packet::LRRTT);
 TRACEF("***** RTT packet data: %s", rtt_packet.data().toHex().c_str());
 rtt_packet.pack();
 Packet test_packet(RNS::Destination(RNS::Type::NONE), rtt_packet.raw());
@@ -387,17 +403,13 @@ test_packet.unpack();
 TRACEF("***** RTT test packet destination hash: %s", test_packet.destination_hash().toHex().c_str());
 TRACEF("***** RTT test packet data size: %d", test_packet.data().size());
 TRACEF("***** RTT test packet data: %s", test_packet.data().toHex().c_str());
-Bytes plaintext = decrypt(test_packet.data());
+Bytes plaintext = self.decrypt(test_packet.data());
 TRACEF("***** RTT test packet plaintext: %s", plaintext.toHex().c_str());
 					rtt_packet.send();
-					had_outbound();
+					self.had_outbound();
 
-					if (_object->_callbacks._established != nullptr) {
-						VERBOSEF("Link %s is established", link_id().toHex().c_str());
-						//p thread = threading.Thread(target=_object->_callbacks.link_established, args=(self,))
-						//p thread.daemon = True
-						//p thread.start()
-						_object->_callbacks._established(*this);
+					if (self._object->_callbacks._established != nullptr) {
+						self._object->_callbacks._established(self);
 					}
 				}
 				else {
@@ -1049,6 +1061,7 @@ void Link::receive(const Packet& packet) {
 				switch (packet.context()) {
 				case Type::Packet::CONTEXT_NONE:
 				{
+					DEBUGF("Link::receive CTX_NONE: data_sz=%zu first64=%s", packet.data().size(), packet.data().left(64).toHex().c_str());
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
 						if (_object->_callbacks._packet) {
@@ -1165,6 +1178,7 @@ void Link::receive(const Packet& packet) {
 					if (!_object->_initiator) {
 						rtt_packet(packet);
 					}
+					break;
 				}
 				case Type::Packet::LINKCLOSE:
 				{
@@ -1265,8 +1279,10 @@ void Link::receive(const Packet& packet) {
 */
 				case Type::Packet::RESOURCE_ADV:
 				{
+					DEBUGF("Link::receive RESOURCE_ADV: data_sz=%zu first64=%s", packet.data().size(), packet.data().left(64).toHex().c_str());
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
+						DEBUGF("Link::receive RESOURCE_ADV: decrypt OK pt_sz=%zu", plaintext.size());
 						// Store plaintext in packet for Resource::accept to use
 						const_cast<Packet&>(packet).plaintext(plaintext);
 
@@ -1478,7 +1494,7 @@ const Bytes Link::decrypt(const Bytes& ciphertext) {
 		return _object->_token->decrypt(ciphertext);
 	}
 	catch (std::exception& e) {
-		ERRORF("Decryption failed on link %s. The contained exception was: %s", toString().c_str(), e.what());
+		ERRORF("Decryption FAILED on link %s: %s (ct_sz=%zu ct_first32=%s)", toString().c_str(), e.what(), ciphertext.size(), ciphertext.left(32).toHex().c_str());
 		return {Bytes::NONE};
 	}
 }
@@ -1593,7 +1609,7 @@ void Link::cancel_incoming_resource(const Resource& resource) {
 
 bool Link::ready_for_new_resource() {
 	assert(_object);
-	return (_object->_outgoing_resources_count > 0);
+	return (_object->_outgoing_resources_count == 0);
 }
 
 SegmentAccumulator& Link::segment_accumulator() {

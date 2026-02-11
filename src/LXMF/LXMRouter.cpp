@@ -207,6 +207,16 @@ static void static_packet_callback(const Bytes& data, const Packet& packet) {
 	}
 }
 
+// Static packet callback for link (uses link destination hash for router lookup)
+static void static_link_packet_callback(const Bytes& data, const Packet& packet) {
+	// For link packets, destination_hash() is the link_id, not the delivery destination.
+	// Look up the router via the link's destination hash instead.
+	RouterRegistrySlot* slot = find_router_registry_slot(packet.link().destination().hash());
+	if (slot) {
+		slot->router->on_packet(data, packet);
+	}
+}
+
 // Static link callbacks
 static void static_link_established_callback(Link& link) {
 	// Find router that owns this link destination
@@ -564,12 +574,12 @@ void LXMRouter::handle_outbound(LXMessage& message) {
 	// Pack the message
 	message.pack();
 
-	// Check if message fits in a single packet - use OPPORTUNISTIC if so
-	// OPPORTUNISTIC is simpler (no link needed) and works when identity is known
-	if (message.packed_size() <= Type::Constants::ENCRYPTED_PACKET_MDU) {
-		INFO("  Message fits in single packet, will use OPPORTUNISTIC delivery");
+	// Check if message fits in a single LoRa packet - use OPPORTUNISTIC if so
+	// Use LORA_ENCRYPTED_PACKET_MDU (159) to ensure packet fits within LoRa wire MTU (255)
+	if (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU) {
+		INFO("  Message fits in single LoRa packet, will use OPPORTUNISTIC delivery");
 	} else {
-		INFO("  Message too large for single packet, will use DIRECT (link) delivery");
+		INFO("  Message too large for single LoRa packet, will use DIRECT (link) delivery");
 	}
 
 	// Set state to outbound
@@ -604,6 +614,20 @@ void LXMRouter::process_outbound() {
 	DEBUG(buf);
 
 	try {
+		// Check max delivery attempts
+		if (message.delivery_attempts() >= MAX_DELIVERY_ATTEMPTS) {
+			WARNING("Max delivery attempts reached for message to " + message.destination_hash().toHex());
+			message.state(Type::Message::FAILED);
+			if (_failed_callback) {
+				_failed_callback(message);
+			}
+			failed_outbound_push(message);
+			LXMessage dummy;
+			pending_outbound_pop(dummy);
+			return;
+		}
+		message.increment_delivery_attempts();
+
 		// If propagation-only mode is enabled, send via propagation node
 		if (_propagation_only) {
 			DEBUG("  Using PROPAGATED delivery (propagation-only mode)");
@@ -623,28 +647,20 @@ void LXMRouter::process_outbound() {
 			return;
 		}
 
-		// Determine delivery method based on message size
-		bool use_opportunistic = (message.packed_size() <= Type::Constants::ENCRYPTED_PACKET_MDU);
+		// Determine delivery method based on message size (LoRa-constrained threshold)
+		bool use_opportunistic = (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU);
 
 		if (use_opportunistic) {
 			// OPPORTUNISTIC delivery - send as single encrypted packet
 			DEBUG("  Using OPPORTUNISTIC delivery (single packet)");
 
-			// Check if we have a path to the destination
-			if (!Transport::has_path(message.destination_hash())) {
-				// Request path from network
-				INFO("  No path to destination, requesting...");
-				Transport::request_path(message.destination_hash());
-				_next_outbound_process_time = now + PATH_REQUEST_WAIT;
-				return;
-			}
-
-			// Try to recall the destination identity
+			// Try to recall the destination identity (needed to encrypt the packet)
 			Identity dest_identity = Identity::recall(message.destination_hash());
 			if (!dest_identity) {
-				// Path exists but identity not cached yet - wait for announce
-				INFO("  Path exists but identity not known, waiting for announce...");
-				_next_outbound_process_time = now + OUTBOUND_RETRY_DELAY;
+				// Identity not known - request path which may trigger an announce
+				INFO("  Destination identity not known, requesting path...");
+				Transport::request_path(message.destination_hash());
+				_next_outbound_process_time = now + PATH_REQUEST_WAIT;
 				return;
 			}
 
@@ -1286,9 +1302,11 @@ void LXMRouter::on_incoming_link_established(Link& link) {
 	snprintf(buf, sizeof(buf), "  Link ID: %s", link.link_id().toHex().c_str());
 	DEBUG(buf);
 
-	// Set up resource concluded callback to receive LXMF messages over this link
+	// Set up packet callback for single-packet LXMF messages (CONTEXT_NONE)
+	link.set_packet_callback(static_link_packet_callback);
+	// Set up resource concluded callback for multi-packet LXMF messages
 	link.set_resource_concluded_callback(static_resource_concluded_callback);
-	DEBUG("  Resource callback registered for incoming LXMF messages");
+	DEBUG("  Packet and resource callbacks registered for incoming LXMF messages");
 }
 
 // Resource concluded callback (LXMF message received via DIRECT delivery)
