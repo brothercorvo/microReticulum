@@ -1202,7 +1202,12 @@ using namespace RNS::Utilities;
 					AnnounceEntry& announce_entry = slot.entry;
 //TRACE("[0] announce entry data size: " + std::to_string(announce_entry._packet.data().size()));
 					//p announce_entry = Transport.announce_table[destination_hash]
-					if (announce_entry._retries > Type::Transport::PATHFINDER_R) {
+					if (announce_entry._retries > 0 && announce_entry._retries >= Type::Transport::LOCAL_REBROADCASTS_MAX) {
+						TRACE("Completed announce processing for " + destination_hash.toHex() + ", local rebroadcast limit reached");
+						slot.clear();
+						break;
+					}
+					else if (announce_entry._retries > Type::Transport::PATHFINDER_R) {
 						TRACE("Completed announce processing for " + destination_hash.toHex() + ", retry limit reached");
 						// CBA OK to modify collection here since we're immediately exiting iteration
 						slot.clear();
@@ -1242,7 +1247,9 @@ using namespace RNS::Utilities;
 								announce_context,
 								Type::Transport::TRANSPORT,
 								Type::Packet::HEADER_2,
-								Transport::_identity.hash()
+								Transport::_identity.hash(),
+								true,
+								announce_entry._packet.context_flag()
 							);
 
 							new_packet.hops(announce_entry._hops);
@@ -2116,7 +2123,7 @@ using namespace RNS::Utilities;
 }
 
 /*static*/ void Transport::inbound(const Bytes& raw, const Interface& interface /*= {Type::NONE}*/) {
-	TRACE("Transport::inbound()");
+	TRACEF("Transport::inbound: received %zu bytes", raw.size());
 	++_packets_received;
 	// CBA
 	if (_callbacks._receive_packet) {
@@ -2897,7 +2904,9 @@ using namespace RNS::Utilities;
 											announce_context,
 											Type::Transport::TRANSPORT,
 											Type::Packet::HEADER_2,
-											_identity.hash()
+											_identity.hash(),
+											true,
+											packet.context_flag()
 										);
 
 										new_announce.hops(packet.hops());
@@ -2917,7 +2926,9 @@ using namespace RNS::Utilities;
 											announce_context,
 											Type::Transport::TRANSPORT,
 											Type::Packet::HEADER_2,
-											_identity.hash()
+											_identity.hash(),
+											true,
+											packet.context_flag()
 										);
 
 										new_announce.hops(packet.hops());
@@ -2951,7 +2962,9 @@ using namespace RNS::Utilities;
 								Type::Packet::PATH_RESPONSE,
 								Type::Transport::TRANSPORT,
 								Type::Packet::HEADER_2,
-								_identity.hash()
+								_identity.hash(),
+								true,
+								packet.context_flag()
 							);
 
 							new_announce.hops(packet.hops());
