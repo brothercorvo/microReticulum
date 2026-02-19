@@ -316,9 +316,9 @@ Can be used to load previously created and saved identities into Reticulum.
 			slot->set_hash(destination_hash);
 			slot->entry = IdentityEntry(OS::time(), packet_hash, public_key, app_data);
 			should_save = true;
-		} else if (app_data && app_data.size() > 0 && slot->entry._app_data != app_data) {
+		} else if (app_data && app_data.size() > 0 && !slot->entry.app_data_equals(app_data)) {
 			// Update existing with new app_data
-			slot->entry._app_data = app_data;
+			slot->entry.set_app_data(app_data);
 			slot->entry._timestamp = OS::time();
 			should_save = true;
 		}
@@ -344,7 +344,7 @@ Recall identity for a destination hash.
 		const IdentityEntry& identity_data = slot->entry;
 		Identity identity(false);
 		identity.load_public_key(identity_data.public_key_bytes());
-		identity.app_data(identity_data._app_data);
+		identity.app_data(identity_data.app_data_bytes());
 		return identity;
 	}
 	else {
@@ -374,7 +374,7 @@ Recall last heard app_data for a destination hash.
 	if (slot != nullptr) {
 		TRACE("Identity::recall_app_data: Found identity entry for destination " + destination_hash.toHex());
 		const IdentityEntry& identity_data = slot->entry;
-		return identity_data._app_data;
+		return identity_data.app_data_bytes();
 	}
 	else {
 		TRACE("Identity::recall_app_data: Unable to find identity entry for destination " + destination_hash.toHex());
@@ -442,10 +442,10 @@ Recall last heard app_data for a destination hash.
 			// public_key: 64 bytes
 			file.write(slot.entry._public_key, PUBLIC_KEY_SIZE);
 			// app_data_len: 2 bytes + app_data: variable
-			uint16_t app_data_len = static_cast<uint16_t>(slot.entry._app_data.size());
+			uint16_t app_data_len = static_cast<uint16_t>(slot.entry._app_data_len);
 			file.write((const uint8_t*)&app_data_len, sizeof(uint16_t));
 			if (app_data_len > 0) {
-				file.write(slot.entry._app_data.data(), app_data_len);
+				file.write(slot.entry._app_data, app_data_len);
 			}
 		}
 
