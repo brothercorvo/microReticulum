@@ -586,6 +586,20 @@ void BLEPeerManager::cleanupStalePeers(double max_age) {
             }
         }
     }
+
+    // Zombie detection: connected peers with no recent activity
+    for (size_t i = 0; i < PEERS_POOL_SIZE; i++) {
+        if (!_peers_by_identity_pool[i].in_use) continue;
+
+        PeerInfo& peer = _peers_by_identity_pool[i].peer;
+        if (peer.isConnected() && peer.last_activity > 0) {
+            double idle = now - peer.last_activity;
+            if (idle > Timing::ZOMBIE_TIMEOUT) {
+                WARNING("BLEPeerManager: Zombie peer detected, marking for disconnect");
+                peer.state = PeerState::DISCONNECTING;
+            }
+        }
+    }
 }
 
 //=============================================================================
