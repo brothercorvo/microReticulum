@@ -1773,10 +1773,11 @@ using namespace RNS::Utilities;
 						TRACE("Transport::outbound: Pscket destination is link-closed, not transmitting");
 						should_transmit = false;
 					}
-					// CBA Bug? Destination has no member attached_interface
-					//z if (interface != packet.destination().attached_interface()) {
-					//z 	should_transmit = false;
-					//z }
+					// Route link packets only through the link's attached interface
+					if (packet.destination_link().attached_interface() && interface != packet.destination_link().attached_interface()) {
+						TRACE("Transport::outbound: Link packet not for this interface, skipping");
+						should_transmit = false;
+					}
 				}
 				
 				if (packet.attached_interface() && interface != packet.attached_interface()) {

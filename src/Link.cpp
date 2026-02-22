@@ -1724,6 +1724,11 @@ const Destination& Link::destination() const {
 	return _object->_destination;
 }
 
+const Interface& Link::attached_interface() const {
+	assert(_object);
+	return _object->_attached_interface;
+}
+
 // CBA LINK
 /*
 const Destination& Link::link_destination() const {
