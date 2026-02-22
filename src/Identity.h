@@ -121,6 +121,7 @@ namespace RNS {
 		static size_t known_destinations_count();
 		//static std::map<Bytes, IdentityEntry> _known_destinations;
 		static bool _saving_known_destinations;
+		static bool _known_destinations_dirty;
 		// CBA
 		static uint16_t _known_destinations_maxsize;
 

@@ -27,6 +27,7 @@ using namespace RNS::Utilities;
 // Pool for known destinations - allocated in PSRAM to free ~29KB internal RAM
 /*static*/ Identity::KnownDestinationSlot* Identity::_known_destinations_pool = nullptr;
 /*static*/ bool Identity::_saving_known_destinations = false;
+/*static*/ bool Identity::_known_destinations_dirty = false;
 /*static*/ uint16_t Identity::_known_destinations_maxsize = 2048;  // Matches KNOWN_DESTINATIONS_SIZE
 
 // Initialize known destinations pool in PSRAM
@@ -323,9 +324,9 @@ Can be used to load previously created and saved identities into Reticulum.
 			should_save = true;
 		}
 
-		// Persist to storage if changed
+		// Mark dirty — actual save deferred to periodic persist_data() call
 		if (should_save) {
-			save_known_destinations();
+			_known_destinations_dirty = true;
 		}
 	}
 }
@@ -760,7 +761,10 @@ Recall last heard app_data for a destination hash.
 
 /*static*/ void Identity::persist_data() {
 	if (!Transport::reticulum() || !Transport::reticulum().is_connected_to_shared_instance()) {
-		save_known_destinations();
+		if (_known_destinations_dirty) {
+			save_known_destinations();
+			_known_destinations_dirty = false;
+		}
 	}
 }
 
