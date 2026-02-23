@@ -90,6 +90,7 @@ namespace RNS {
 		static constexpr size_t KNOWN_DESTINATIONS_SIZE = 2048;
 		struct KnownDestinationSlot {
 			bool in_use = false;
+			bool persist = false;  // Only save to flash if true (contact/conversation peer)
 			uint8_t destination_hash[DEST_HASH_SIZE];  // Fixed array - no heap alloc
 			IdentityEntry entry;
 
@@ -106,6 +107,7 @@ namespace RNS {
 			}
 			void clear() {
 				in_use = false;
+				persist = false;
 				memset(destination_hash, 0, DEST_HASH_SIZE);
 				entry = IdentityEntry();
 			}
@@ -288,6 +290,13 @@ namespace RNS {
 		// set this to feed the watchdog timer and/or yield the CPU.
 		static void (*_persist_yield_callback)();
 		static void set_persist_yield_callback(void (*cb)()) { _persist_yield_callback = cb; }
+
+		// Mark a known destination for persistence. Only persistent destinations
+		// are written to flash — the rest stay in RAM for routing but don't
+		// survive reboots. Call this when a message is sent to or received from
+		// a destination (i.e., it's a real contact, not just a network announce).
+		static void mark_persistent(const Bytes& destination_hash);
+		static size_t persistent_destinations_count();
 
 		// getters/setters
 		inline const Bytes& encryptionPrivateKey() const { assert(_object); return _object->_prv_bytes; }

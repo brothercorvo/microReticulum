@@ -414,15 +414,12 @@ Recall last heard app_data for a destination hash.
 
 		double save_start = OS::time();
 
-		size_t dest_count = known_destinations_count();
-		size_t app_data_count = 0;
-		for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
-			if (_known_destinations_pool[i].in_use && _known_destinations_pool[i].entry._app_data_len > 0) {
-				app_data_count++;
-			}
-		}
-		INFO("Saving " + std::to_string(dest_count) + " known destinations (" +
-		     std::to_string(app_data_count) + " with app_data) to storage...");
+		// Only save persistent destinations (contacts with message history).
+		// Network announces stay in RAM but don't need to survive reboots.
+		size_t persist_count = persistent_destinations_count();
+		size_t total_count = known_destinations_count();
+		INFO("Saving " + std::to_string(persist_count) + " persistent destinations (" +
+		     std::to_string(total_count) + " total in pool) to storage...");
 
 		// Atomic save: write to temp file first, then rename.
 		// If a crash occurs mid-write, the original file is intact.
@@ -438,16 +435,17 @@ Recall last heard app_data for a destination hash.
 		// Write header: magic (4) + version (1) + count (2) = 7 bytes
 		const uint8_t magic[4] = {'K', 'D', 'S', 'T'};
 		const uint8_t version = 1;
-		uint16_t count = static_cast<uint16_t>(dest_count);
+		uint16_t count = static_cast<uint16_t>(persist_count);
 
 		file.write(magic, 4);
 		file.write(&version, 1);
 		file.write((const uint8_t*)&count, sizeof(uint16_t));
 
-		// Write each entry directly from fixed arrays - no heap allocation!
+		// Write each persistent entry directly from fixed arrays - no heap allocation!
 		size_t entries_written = 0;
 		for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
 			if (!_known_destinations_pool[i].in_use) continue;
+			if (!_known_destinations_pool[i].persist) continue;  // Skip non-persistent
 			const KnownDestinationSlot& slot = _known_destinations_pool[i];
 
 			// destination_hash: 16 bytes
@@ -490,7 +488,7 @@ Recall last heard app_data for a destination hash.
 			time_str = std::to_string(OS::round(save_time, 1)) + " s";
 		}
 
-		DEBUG("Saved " + std::to_string(dest_count) + " known destinations in " + time_str);
+		DEBUG("Saved " + std::to_string(persist_count) + " known destinations in " + time_str);
 
 		success = true;
 	}
@@ -604,6 +602,7 @@ Recall last heard app_data for a destination hash.
 					break;
 				}
 				slot->in_use = true;
+				slot->persist = true;  // Loaded from disk = previously a contact
 				slot->set_hash(dest_hash);
 				slot->entry = IdentityEntry(timestamp, packet_hash, public_key, app_data);
 				loaded_count++;
@@ -836,6 +835,30 @@ Recall last heard app_data for a destination hash.
 
 /*static*/ void Identity::exit_handler() {
 	persist_data();
+}
+
+/*static*/ void Identity::mark_persistent(const Bytes& destination_hash) {
+	if (!_known_destinations_pool) return;
+	KnownDestinationSlot* slot = find_known_destination_slot(destination_hash);
+	if (slot && !slot->persist) {
+		slot->persist = true;
+		_known_destinations_dirty = true;
+		if (_known_destinations_dirty_since == 0) {
+			_known_destinations_dirty_since = OS::time();
+		}
+		DEBUG("Identity: Marked " + destination_hash.toHex().substr(0, 8) + " as persistent contact");
+	}
+}
+
+/*static*/ size_t Identity::persistent_destinations_count() {
+	if (!_known_destinations_pool) return 0;
+	size_t count = 0;
+	for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
+		if (_known_destinations_pool[i].in_use && _known_destinations_pool[i].persist) {
+			count++;
+		}
+	}
+	return count;
 }
 
 /*
