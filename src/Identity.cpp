@@ -28,6 +28,7 @@ using namespace RNS::Utilities;
 /*static*/ Identity::KnownDestinationSlot* Identity::_known_destinations_pool = nullptr;
 /*static*/ bool Identity::_saving_known_destinations = false;
 /*static*/ bool Identity::_known_destinations_dirty = false;
+/*static*/ double Identity::_known_destinations_dirty_since = 0;
 /*static*/ uint16_t Identity::_known_destinations_maxsize = 2048;  // Matches KNOWN_DESTINATIONS_SIZE
 
 // Initialize known destinations pool in PSRAM
@@ -326,6 +327,9 @@ Can be used to load previously created and saved identities into Reticulum.
 
 		// Mark dirty — actual save deferred to periodic persist_data() call
 		if (should_save) {
+			if (!_known_destinations_dirty) {
+				_known_destinations_dirty_since = OS::time();
+			}
 			_known_destinations_dirty = true;
 		}
 	}
@@ -410,12 +414,22 @@ Recall last heard app_data for a destination hash.
 		double save_start = OS::time();
 
 		size_t dest_count = known_destinations_count();
-		DEBUG("Saving " + std::to_string(dest_count) + " known destinations to storage (binary)...");
+		size_t app_data_count = 0;
+		for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
+			if (_known_destinations_pool[i].in_use && _known_destinations_pool[i].entry._app_data_len > 0) {
+				app_data_count++;
+			}
+		}
+		INFO("Saving " + std::to_string(dest_count) + " known destinations (" +
+		     std::to_string(app_data_count) + " with app_data) to storage...");
 
-		// Open file for writing using OS filesystem abstraction
-		FileStream file = OS::open_file(storage_path, FileStream::MODE_WRITE);
+		// Atomic save: write to temp file first, then rename.
+		// If a crash occurs mid-write, the original file is intact.
+		const char* temp_path = "/known_dst.tmp";
+
+		FileStream file = OS::open_file(temp_path, FileStream::MODE_WRITE);
 		if (!file) {
-			ERROR("Failed to open known destinations file for writing");
+			ERROR("Failed to open temp file for writing known destinations");
 			_saving_known_destinations = false;
 			return false;
 		}
@@ -452,6 +466,14 @@ Recall last heard app_data for a destination hash.
 
 		file.close();
 
+		// Atomic rename: delete old file, rename temp to final path
+		OS::remove_file(storage_path);
+		if (!OS::rename_file(temp_path, storage_path)) {
+			WARNING("Failed to rename temp file to known destinations, trying direct copy");
+			// Fallback: temp file exists with valid data, next boot will find it
+			// or we can try again next persist cycle
+		}
+
 		std::string time_str;
 		double save_time = OS::time() - save_start;
 		if (save_time < 1) {
@@ -482,6 +504,13 @@ Recall last heard app_data for a destination hash.
 
 	// Binary format - much more memory efficient than JSON
 	const char* storage_path = "/known_dst.bin";
+	const char* temp_path = "/known_dst.tmp";
+
+	// If main file doesn't exist but temp does, a crash interrupted the rename
+	if (!OS::file_exists(storage_path) && OS::file_exists(temp_path)) {
+		INFO("Recovering known destinations from temp file (crash during save)");
+		OS::rename_file(temp_path, storage_path);
+	}
 
 	if (!OS::file_exists(storage_path)) {
 		DEBUG("No known destinations file found, starting fresh");
@@ -503,8 +532,9 @@ Recall last heard app_data for a destination hash.
 
 		if (file.readBytes((char*)magic, 4) != 4 ||
 		    magic[0] != 'K' || magic[1] != 'D' || magic[2] != 'S' || magic[3] != 'T') {
-			WARNING("Invalid known destinations file magic");
+			WARNING("Invalid known destinations file magic, deleting corrupt file");
 			file.close();
+			OS::remove_file(storage_path);
 			return;
 		}
 
@@ -520,7 +550,7 @@ Recall last heard app_data for a destination hash.
 			return;
 		}
 
-		DEBUG("Loading " + std::to_string(count) + " known destinations from storage (binary)...");
+		INFO("Loading " + std::to_string(count) + " known destinations from storage (binary)...");
 
 		size_t loaded_count = 0;
 
@@ -575,7 +605,15 @@ Recall last heard app_data for a destination hash.
 
 		file.close();
 
-		DEBUG("Loaded " + std::to_string(loaded_count) + " known destinations from storage");
+		INFO("Loaded " + std::to_string(loaded_count) + " known destinations from storage");
+		// Count entries with app_data for debug
+		size_t with_app_data = 0;
+		for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
+			if (_known_destinations_pool[i].in_use && _known_destinations_pool[i].entry._app_data_len > 0) {
+				with_app_data++;
+			}
+		}
+		INFO("  " + std::to_string(with_app_data) + " entries have app_data (display names)");
 
 	} catch (std::exception& e) {
 		ERRORF("Error loading known destinations from disk: %s", e.what());
@@ -762,10 +800,27 @@ Recall last heard app_data for a destination hash.
 /*static*/ void Identity::persist_data() {
 	if (!Transport::reticulum() || !Transport::reticulum().is_connected_to_shared_instance()) {
 		if (_known_destinations_dirty) {
-			save_known_destinations();
-			_known_destinations_dirty = false;
+			INFO("Identity: Persisting " + std::to_string(known_destinations_count()) + " known destinations (dirty flag set)");
+			if (save_known_destinations()) {
+				_known_destinations_dirty = false;
+				_known_destinations_dirty_since = 0;
+			} else {
+				ERROR("Identity: Failed to save known destinations!");
+			}
 		}
 	}
+}
+
+/*static*/ bool Identity::should_persist_data() {
+	// Persist if dirty for more than 5 seconds (don't wait for the full 60s interval)
+	if (_known_destinations_dirty && _known_destinations_dirty_since > 0) {
+		double age = OS::time() - _known_destinations_dirty_since;
+		if (age >= 5.0) {
+			persist_data();
+			return true;
+		}
+	}
+	return false;
 }
 
 /*static*/ void Identity::exit_handler() {

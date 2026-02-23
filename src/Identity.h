@@ -122,6 +122,7 @@ namespace RNS {
 		//static std::map<Bytes, IdentityEntry> _known_destinations;
 		static bool _saving_known_destinations;
 		static bool _known_destinations_dirty;
+		static double _known_destinations_dirty_since;  // When dirty flag was first set
 		// CBA
 		static uint16_t _known_destinations_maxsize;
 
@@ -279,6 +280,7 @@ namespace RNS {
 
 		static bool validate_announce(const Packet& packet);
 		static void persist_data();
+		static bool should_persist_data();  // Persist if dirty for >5s
 		static void exit_handler();
 
 		// getters/setters
