@@ -283,6 +283,12 @@ namespace RNS {
 		static bool should_persist_data();  // Persist if dirty for >5s
 		static void exit_handler();
 
+		// Yield callback — called periodically during long persistence operations
+		// (e.g., writing 50+ known destinations to flash). Platform code should
+		// set this to feed the watchdog timer and/or yield the CPU.
+		static void (*_persist_yield_callback)();
+		static void set_persist_yield_callback(void (*cb)()) { _persist_yield_callback = cb; }
+
 		// getters/setters
 		inline const Bytes& encryptionPrivateKey() const { assert(_object); return _object->_prv_bytes; }
 		inline const Bytes& signingPrivateKey() const { assert(_object); return _object->_sig_prv_bytes; }

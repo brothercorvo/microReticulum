@@ -27,6 +27,7 @@ using namespace RNS::Utilities;
 // Pool for known destinations - allocated in PSRAM to free ~29KB internal RAM
 /*static*/ Identity::KnownDestinationSlot* Identity::_known_destinations_pool = nullptr;
 /*static*/ bool Identity::_saving_known_destinations = false;
+/*static*/ void (*Identity::_persist_yield_callback)() = nullptr;
 /*static*/ bool Identity::_known_destinations_dirty = false;
 /*static*/ double Identity::_known_destinations_dirty_since = 0;
 /*static*/ uint16_t Identity::_known_destinations_maxsize = 2048;  // Matches KNOWN_DESTINATIONS_SIZE
@@ -444,6 +445,7 @@ Recall last heard app_data for a destination hash.
 		file.write((const uint8_t*)&count, sizeof(uint16_t));
 
 		// Write each entry directly from fixed arrays - no heap allocation!
+		size_t entries_written = 0;
 		for (size_t i = 0; i < KNOWN_DESTINATIONS_SIZE; ++i) {
 			if (!_known_destinations_pool[i].in_use) continue;
 			const KnownDestinationSlot& slot = _known_destinations_pool[i];
@@ -461,6 +463,11 @@ Recall last heard app_data for a destination hash.
 			file.write((const uint8_t*)&app_data_len, sizeof(uint16_t));
 			if (app_data_len > 0) {
 				file.write(slot.entry._app_data, app_data_len);
+			}
+
+			// Yield periodically to feed watchdog during slow flash I/O
+			if (_persist_yield_callback && (++entries_written % 5 == 0)) {
+				_persist_yield_callback();
 			}
 		}
 
@@ -812,10 +819,14 @@ Recall last heard app_data for a destination hash.
 }
 
 /*static*/ bool Identity::should_persist_data() {
-	// Persist if dirty for more than 5 seconds (don't wait for the full 60s interval)
+	// Persist if dirty for more than 60 seconds.
+	// Writing 100+ destinations to SPIFFS takes 20-50s with GC, so frequent
+	// persists cause severe fragmentation and main-loop stalls. 60s gives the
+	// flash controller time to recover between writes. Data survives reboots
+	// because recoverBLEStack() and exit_handler() force an immediate persist.
 	if (_known_destinations_dirty && _known_destinations_dirty_since > 0) {
 		double age = OS::time() - _known_destinations_dirty_since;
-		if (age >= 5.0) {
+		if (age >= 60.0) {
 			persist_data();
 			return true;
 		}
