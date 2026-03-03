@@ -167,6 +167,71 @@ class TestCppFields:
             assert fields[key_bytes] == val_bytes, f"Field value mismatch for key {key_hex}"
 
 
+class TestCppStamp:
+    """Test that C++ generated stamps are valid per Python LXMF."""
+
+    def test_stamp_present(self, cpp_vectors):
+        """C++ stamped message should have a 32-byte stamp after unpack."""
+        v = get_vector_by_name(cpp_vectors, "cpp_with_stamp")
+        register_source_identity(v)
+
+        packed = bytes.fromhex(v["packed"])
+        msg = LXMF.LXMessage.unpack_from_bytes(packed)
+
+        assert msg.stamp is not None, "Stamp missing from unpacked message"
+        assert len(msg.stamp) == 32, f"Stamp wrong size: {len(msg.stamp)}"
+
+    def test_stamp_bytes_match(self, cpp_vectors):
+        """Stamp bytes from unpack should match what C++ reported."""
+        v = get_vector_by_name(cpp_vectors, "cpp_with_stamp")
+        register_source_identity(v)
+
+        packed = bytes.fromhex(v["packed"])
+        msg = LXMF.LXMessage.unpack_from_bytes(packed)
+
+        expected_stamp = bytes.fromhex(v["stamp"])
+        assert msg.stamp == expected_stamp
+
+    def test_stamp_validates(self, cpp_vectors):
+        """Python LXStamper should accept the C++ generated stamp."""
+        from LXMF import LXStamper
+
+        v = get_vector_by_name(cpp_vectors, "cpp_with_stamp")
+        register_source_identity(v)
+
+        packed = bytes.fromhex(v["packed"])
+        msg = LXMF.LXMessage.unpack_from_bytes(packed)
+
+        stamp_cost = v["stamp_cost"]
+        assert msg.validate_stamp(stamp_cost), (
+            f"Python rejected C++ stamp (cost={stamp_cost})"
+        )
+
+    def test_stamp_signature_valid(self, cpp_vectors):
+        """Signature should be valid (computed over 4-element payload without stamp)."""
+        v = get_vector_by_name(cpp_vectors, "cpp_with_stamp")
+        packed = bytes.fromhex(v["packed"])
+        assert validate_signature_manual(packed, v["source_identity_pub"])
+
+    def test_stamp_hash_matches(self, cpp_vectors):
+        """Hash should be computed over the payload WITHOUT stamp."""
+        v = get_vector_by_name(cpp_vectors, "cpp_with_stamp")
+        packed = bytes.fromhex(v["packed"])
+
+        dest_hash = packed[:16]
+        src_hash = packed[16:32]
+        payload = packed[96:]
+
+        # Strip stamp (5th element) before computing hash
+        decoded = umsgpack.unpackb(payload)
+        if len(decoded) > 4:
+            payload = umsgpack.packb(decoded[:4])
+
+        hashed_part = dest_hash + src_hash + payload
+        computed_hash = hashlib.sha256(hashed_part).digest()
+        assert computed_hash.hex() == v["message_hash"]
+
+
 class TestBidirectionalRoundtrip:
     """Test that Python→C++→Python roundtrip preserves data.
 
@@ -181,12 +246,18 @@ class TestBidirectionalRoundtrip:
         Note: hash won't be identical because C++ generates new messages
         (different keys/timestamps). Instead we verify that Python can
         independently compute the same hash from the C++ packed bytes.
+        Hash is always over the 4-element payload (without stamp).
         """
         for v in cpp_vectors:
             packed = bytes.fromhex(v["packed"])
             dest_hash = packed[:16]
             src_hash = packed[16:32]
             payload = packed[96:]
+
+            # Strip stamp (5th element) if present before computing hash
+            decoded = umsgpack.unpackb(payload)
+            if len(decoded) > 4:
+                payload = umsgpack.packb(decoded[:4])
 
             hashed_part = dest_hash + src_hash + payload
             py_hash = hashlib.sha256(hashed_part).digest()

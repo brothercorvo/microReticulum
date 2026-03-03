@@ -175,9 +175,9 @@ def generate_with_stamp():
     """Message with a stamp (proof-of-work).
 
     LXMF stamps are appended as the 5th element of the payload array.
-    The hash and signature must be recalculated over the new payload.
+    Hash and signature are computed over the 4-element payload (WITHOUT stamp),
+    then the stamp is appended for the wire format.
     """
-    import hashlib
     from RNS.vendor import umsgpack
 
     source_id = make_identity()
@@ -193,30 +193,24 @@ def generate_with_stamp():
     )
     msg.pack()
 
-    # Generate stamp (PoW against the unstamped message hash)
+    # Generate stamp (PoW against the message hash, which is over 4-element payload)
     stamp = msg.get_stamp(timeout=30)
 
-    # Manually rebuild packed message with stamp in payload array:
-    # 1. Decode original payload, append stamp
+    # Hash and signature from pack() are already correct (over 4-element payload).
+    # Just append stamp as 5th element to the wire payload.
     dest_hash = msg.packed[:16]
     src_hash = msg.packed[16:32]
+    original_sig = msg.packed[32:96]
     payload_bytes = msg.packed[96:]
+
+    # Append stamp as 5th element
     payload_arr = umsgpack.unpackb(payload_bytes)
     payload_arr.append(stamp)
     new_payload_bytes = umsgpack.packb(payload_arr)
 
-    # 2. Recalculate hash over (dest_hash + src_hash + new_payload)
-    hashed_part = dest_hash + src_hash + new_payload_bytes
-    new_hash = hashlib.sha256(hashed_part).digest()
+    # Assemble with original signature (computed over 4-element payload)
+    new_packed = dest_hash + src_hash + original_sig + new_payload_bytes
 
-    # 3. Re-sign: signed_part = hashed_part + new_hash
-    signed_part = hashed_part + new_hash
-    new_sig = source_id.sign(signed_part)
-
-    # 4. Assemble new packed bytes
-    new_packed = dest_hash + src_hash + new_sig + new_payload_bytes
-
-    # Build vector manually since msg.packed is stale
     vector = {
         "name": "with_stamp",
         "source_identity_prv": source_id.get_private_key().hex(),
@@ -227,7 +221,7 @@ def generate_with_stamp():
         "packed": new_packed.hex(),
         "content": "Stamped message",
         "title": "Stamp Test",
-        "message_hash": new_hash.hex(),
+        "message_hash": msg.hash.hex(),  # Hash over 4-element payload
         "timestamp": msg.timestamp,
         "has_stamp": True,
         "stamp": stamp.hex(),

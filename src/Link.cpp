@@ -18,6 +18,63 @@
 #define MSGPACK_DEBUGLOG_ENABLE 0
 #include <MsgPack.h>
 
+// Helper: parse msgpack [request_id, response_data] without type constraints.
+// The request_id is always BIN (hash bytes). The response_data can be ANY
+// msgpack type (array, int, bin, etc.) — we return its raw bytes for the
+// caller to parse. This is needed for Python interop where response_data
+// is a native msgpack array, not BIN-wrapped.
+// Returns byte offset past request_id (>0 on success, 0 on failure).
+static size_t parse_response_array(const RNS::Bytes& packed, RNS::Bytes& request_id_out, RNS::Bytes& response_data_out) {
+	const uint8_t* p = packed.data();
+	size_t total = packed.size();
+	if (total < 3) return 0;  // Minimum: fixarray(2) + 1 byte + 1 byte
+
+	size_t pos = 0;
+
+	// 1. Parse array header — expect fixarray of 2 (0x92) or array16/array32
+	uint8_t header = p[pos++];
+	size_t arr_size = 0;
+	if ((header & 0xf0) == 0x90) {
+		arr_size = header & 0x0f;  // fixarray
+	} else if (header == 0xdc && pos + 2 <= total) {
+		arr_size = ((size_t)p[pos] << 8) | p[pos+1];  // array16
+		pos += 2;
+	} else if (header == 0xdd && pos + 4 <= total) {
+		arr_size = ((size_t)p[pos] << 24) | ((size_t)p[pos+1] << 16) | ((size_t)p[pos+2] << 8) | p[pos+3];  // array32
+		pos += 4;
+	} else {
+		return 0;  // Not an array
+	}
+	if (arr_size < 2) return 0;
+
+	// 2. Parse element [0]: request_id (BIN type — hash bytes)
+	if (pos >= total) return 0;
+	uint8_t bin_header = p[pos++];
+	size_t bin_len = 0;
+	if (bin_header == 0xc4 && pos + 1 <= total) {  // bin8
+		bin_len = p[pos++];
+	} else if (bin_header == 0xc5 && pos + 2 <= total) {  // bin16
+		bin_len = ((size_t)p[pos] << 8) | p[pos+1];
+		pos += 2;
+	} else if (bin_header == 0xc6 && pos + 4 <= total) {  // bin32
+		bin_len = ((size_t)p[pos] << 24) | ((size_t)p[pos+1] << 16) | ((size_t)p[pos+2] << 8) | p[pos+3];
+		pos += 4;
+	} else {
+		return 0;  // request_id not BIN type
+	}
+	if (pos + bin_len > total) return 0;
+	request_id_out = RNS::Bytes(p + pos, bin_len);
+	pos += bin_len;
+
+	// 3. Remaining bytes are the raw msgpack of element [1] (response_data)
+	if (pos >= total) {
+		response_data_out = RNS::Bytes();
+	} else {
+		response_data_out = RNS::Bytes(p + pos, total - pos);
+	}
+	return pos;
+}
+
 #include <math.h>
 
 #include <algorithm>
@@ -485,9 +542,41 @@ const RNS::RequestReceipt Link::request(const Bytes& path, const Bytes& data /*=
 
 	//p unpacked_request = [OS::time(), request_path_hash, data]
 	//p packed_request = umsgpack.packb(unpacked_request)
-    MsgPack::Packer packer;
-	packer.to_array(OS::time(), request_path_hash, data);
-	Bytes packed_request(packer.data(), packer.size());
+	// NOTE: data is pre-serialized msgpack. We must embed it as raw bytes
+	// (not BIN-wrapped) so Python peers see nested objects, not binary blobs.
+	// Using to_array() would call Bytes::to_msgpack() which packs as BIN type,
+	// causing Python's umsgpack.unpackb() to return bytes instead of the
+	// original structure. Build the packed request manually instead.
+
+	// Pack timestamp as float64
+	MsgPack::Packer ts_packer;
+	ts_packer.pack(OS::time());
+	// Pack path_hash as BIN (correct: both Python and C++ expect bytes)
+	MsgPack::Packer ph_packer;
+	request_path_hash.to_msgpack(ph_packer);
+
+	// Build [timestamp, path_hash, data] with data as raw embedded msgpack
+	size_t total = 1 + ts_packer.size() + ph_packer.size();  // 1 for fixarray header
+	if (data && data.size() > 0) {
+		total += data.size();
+	} else {
+		total += 1;  // nil byte
+	}
+
+	Bytes packed_request;
+	uint8_t* p = packed_request.writable(total);
+	size_t pos = 0;
+	p[pos++] = 0x93;  // fixarray of 3
+	memcpy(p + pos, ts_packer.data(), ts_packer.size());
+	pos += ts_packer.size();
+	memcpy(p + pos, ph_packer.data(), ph_packer.size());
+	pos += ph_packer.size();
+	if (data && data.size() > 0) {
+		memcpy(p + pos, data.data(), data.size());
+		pos += data.size();
+	} else {
+		p[pos++] = 0xc0;  // nil
+	}
 
 	if (timeout == 0.0) {
 		timeout = _object->_rtt * _object->_traffic_timeout_factor + Type::Resource::RESPONSE_MAX_GRACE_TIME * 1.125;
@@ -1012,18 +1101,16 @@ void Link::request_resource_concluded(const Resource& resource) {
 void Link::response_resource_concluded(const Resource& resource) {
 	assert(_object);
 	if (resource.status() == Type::Resource::COMPLETE) {
-		//p packed_response = resource.data.read()
 		Bytes packed_response = resource.data();
-		//p unpacked_response = umsgpack.unpackb(packed_response)
-		//p request_id        = unpacked_response[0]
-		//p response_data     = unpacked_response[1]
-		MsgPack::Unpacker unpacker;
-		unpacker.feed(packed_response.data(), packed_response.size());
-		MsgPack::bin_t<uint8_t> request_id;
-		MsgPack::bin_t<uint8_t> response_data;
-		unpacker.from_array(request_id, response_data);
-
-		handle_response(request_id, response_data, resource.total_size(), resource.size());
+		// Parse [request_id, response_data] — response_data may be any msgpack type
+		Bytes request_id;
+		Bytes response_data;
+		size_t offset = parse_response_array(packed_response, request_id, response_data);
+		if (offset > 0) {
+			handle_response(request_id, response_data, resource.total_size(), resource.size());
+		} else {
+			ERROR("response_resource_concluded: Failed to parse [request_id, response_data]");
+		}
 	}
 	else {
 		DEBUGF("Incoming response resource failed with status: %d", resource.status());
@@ -1173,16 +1260,17 @@ void Link::receive(const Packet& packet) {
 							//p unpacked_response = umsgpack.unpackb(packed_response)
 							//p request_id = unpacked_response[0]
 							//p response_data = unpacked_response[1]
-                            //p transfer_size = len(umsgpack.packb(response_data))-2
-							MsgPack::Unpacker unpacker;
-							unpacker.feed(packed_response.data(), packed_response.size());
-							MsgPack::bin_t<uint8_t> request_id;
-							MsgPack::bin_t<uint8_t> response_data;
-							unpacker.from_array(request_id, response_data);
-							MsgPack::Packer packer;
-							packer.serialize(response_data);
-							size_t transfer_size = packer.size() - 2;
-							handle_response(Bytes(request_id.data(), request_id.size()), Bytes(response_data.data(), response_data.size()), transfer_size, transfer_size);
+							//p transfer_size = len(umsgpack.packb(response_data))-2
+							// NOTE: response_data may be any msgpack type (array, int, etc.)
+							// from Python peers, not just BIN. Extract request_id then take
+							// remaining raw bytes as response data for caller to parse.
+							Bytes request_id;
+							Bytes response_data;
+							size_t offset = parse_response_array(packed_response, request_id, response_data);
+							if (offset > 0) {
+								size_t transfer_size = response_data.size();
+								handle_response(request_id, response_data, transfer_size, transfer_size);
+							}
 						}
 					}
 					catch (std::exception& e) {
@@ -1665,9 +1753,17 @@ void Link::handle_resource_concluded(const Resource& resource) {
 
 	// Check if resource completed successfully
 	if (resource_copy.status() != Type::Resource::COMPLETE) {
-		// Failed resource - clean up and notify application
 		resource_concluded(resource_copy);
 		DEBUGF("Link::handle_resource_concluded: Resource failed with status %d", resource_copy.status());
+		// Check if this failed resource was a response to a pending request
+		if (resource_copy.request_id() && _object->_pending_requests_count > 0) {
+			for (size_t i = 0; i < _object->_pending_requests_count; i++) {
+				if (_object->_pending_requests[i].request_id() == resource_copy.request_id()) {
+					response_resource_concluded(resource_copy);
+					return;
+				}
+			}
+		}
 		if (_object->_callbacks._resource_concluded) {
 			_object->_callbacks._resource_concluded(resource_copy);
 		}
@@ -1695,6 +1791,37 @@ void Link::handle_resource_concluded(const Resource& resource) {
 		}
 		// Fall through if segment_completed returned false (shouldn't happen normally)
 		DEBUG("Link::handle_resource_concluded: segment_completed returned false, falling through");
+	}
+
+	// Check if this resource is a response to a pending Link::request().
+	// First try matching by resource's request_id field (from advertisement).
+	// If that's empty (Python servers often omit it), try parsing the resource
+	// data as [request_id, response_data] and matching the embedded request_id.
+	if (_object->_pending_requests_count > 0) {
+		Bytes match_id = resource_copy.request_id();
+
+		// If no request_id in resource metadata, try extracting from data
+		if (!match_id && resource_copy.data().size() > 3) {
+			Bytes extracted_id;
+			Bytes unused_data;
+			if (parse_response_array(resource_copy.data(), extracted_id, unused_data) > 0) {
+				match_id = extracted_id;
+				DEBUGF("Link::handle_resource_concluded: Extracted request_id from data: %s",
+					match_id.toHex().c_str());
+			}
+		}
+
+		if (match_id) {
+			for (size_t i = 0; i < _object->_pending_requests_count; i++) {
+				if (_object->_pending_requests[i].request_id() == match_id) {
+					DEBUGF("Link::handle_resource_concluded: Resource is response to pending request %s",
+						match_id.toHex().c_str());
+					resource_concluded(resource_copy);
+					response_resource_concluded(resource_copy);
+					return;
+				}
+			}
+		}
 	}
 
 	// Single-segment resource or non-segmented - clean up and notify application

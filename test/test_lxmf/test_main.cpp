@@ -464,6 +464,35 @@ void testCppGenerateVectors() {
 		v["timestamp"] = msg.timestamp();
 	}
 
+	// --- Vector 5: with stamp ---
+	{
+		Identity source_identity;
+		Identity dest_identity;
+		Destination source(source_identity, RNS::Type::Destination::IN, RNS::Type::Destination::SINGLE, "lxmf", "delivery");
+		Destination dest(dest_identity, RNS::Type::Destination::IN, RNS::Type::Destination::SINGLE, "lxmf", "delivery");
+
+		LXMessage msg(dest, source, Bytes("Stamped from C++"), Bytes("Stamp Test"));
+		msg.set_stamp_cost(8);
+		msg.pack();               // First pack to get hash
+		msg.generate_stamp();     // PoW against that hash
+		const Bytes& packed = msg.pack();  // Re-pack with stamp in payload
+
+		TEST_ASSERT_EQUAL_size_t(32, msg.stamp().size());
+
+		JsonObject v = vectors.add<JsonObject>();
+		v["name"] = "cpp_with_stamp";
+		v["source_identity_pub"] = source_identity.get_public_key().toHex();
+		v["source_hash"] = source.hash().toHex();
+		v["dest_hash"] = dest.hash().toHex();
+		v["packed"] = packed.toHex();
+		v["content"] = "Stamped from C++";
+		v["title"] = "Stamp Test";
+		v["message_hash"] = msg.hash().toHex();
+		v["timestamp"] = msg.timestamp();
+		v["stamp"] = msg.stamp().toHex();
+		v["stamp_cost"] = msg.stamp_cost();
+	}
+
 	// Write to file
 	std::ofstream outfile("/tmp/lxmf_cpp_vectors.json");
 	TEST_ASSERT_TRUE(outfile.is_open());

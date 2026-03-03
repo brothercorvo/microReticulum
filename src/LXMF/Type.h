@@ -43,7 +43,7 @@ namespace LXMF {
 			 */
 			enum Method : uint8_t {
 				OPPORTUNISTIC = 0x01,  ///< Single packet, fire-and-forget
-				DIRECT        = 0x02,  ///< Via established link (Phase 1 MVP)
+				DIRECT        = 0x02,  ///< Via established link
 				PROPAGATED    = 0x03,  ///< Store-and-forward via propagation nodes
 				PAPER         = 0x05   ///< QR code / paper-based transfer
 			};
@@ -128,7 +128,7 @@ namespace LXMF {
 			static const uint16_t LORA_LINK_PACKET_MDU = 175;
 
 			/**
-			 * @brief Max content in single link packet: 319 bytes (Phase 1 MVP limit)
+			 * @brief Max content in single link packet: 319 bytes
 			 *
 			 * Calculation: LINK_PACKET_MDU - LXMF_OVERHEAD
 			 * Messages larger than 319 bytes will use Resource transfer.
