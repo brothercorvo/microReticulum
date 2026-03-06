@@ -355,7 +355,7 @@ LXMessage LXMessage::unpack_from_bytes(const Bytes& lxmf_bytes, Type::Message::M
 			unpacker.deserialize(value_bin);
 
 			temp_fields[temp_fields_count].in_use = true;
-			temp_fields[temp_fields_count].key = Bytes({key_int});
+			temp_fields[temp_fields_count].key = Bytes(&key_int, 1);
 			temp_fields[temp_fields_count].value = Bytes(value_bin);
 			++temp_fields_count;
 		}
