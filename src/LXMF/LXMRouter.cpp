@@ -593,8 +593,16 @@ void LXMRouter::process_outbound() {
 			return;
 		}
 
-		// Determine delivery method based on message size (LoRa-constrained threshold)
-		bool use_opportunistic = (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU);
+		// Determine delivery method based on message size
+		// If caller explicitly set OPPORTUNISTIC (e.g., telemetry), use the general
+		// ENCRYPTED_PACKET_MDU (391 bytes) matching Python LXMF behavior.
+		// Otherwise, auto-detect using the conservative LoRa-safe threshold (159 bytes).
+		bool use_opportunistic;
+		if (message.method() == Type::Message::OPPORTUNISTIC) {
+			use_opportunistic = (message.packed_size() <= Type::Constants::ENCRYPTED_PACKET_MDU);
+		} else {
+			use_opportunistic = (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU);
+		}
 
 		if (use_opportunistic) {
 			// OPPORTUNISTIC delivery - send as single encrypted packet

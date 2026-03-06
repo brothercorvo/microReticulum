@@ -142,10 +142,11 @@ const Bytes& LXMessage::pack() {
 	packer.packBinary(_content.data(), _content.size());
 
 	// Element 3: fields (map) - iterate over fixed array
+	// Keys are packed as integers to match Python LXMF (not BIN)
 	packer.packMapSize(_fields_count);
 	for (size_t i = 0; i < MAX_FIELDS; ++i) {
 		if (_fields_pool[i].in_use) {
-			packer.packBinary(_fields_pool[i].key.data(), _fields_pool[i].key.size());
+			packer.pack(_fields_pool[i].key.data()[0]);
 			packer.packBinary(_fields_pool[i].value.data(), _fields_pool[i].value.size());
 		}
 	}
@@ -190,7 +191,7 @@ const Bytes& LXMessage::pack() {
 		wire_packer.packMapSize(_fields_count);
 		for (size_t i = 0; i < MAX_FIELDS; ++i) {
 			if (_fields_pool[i].in_use) {
-				wire_packer.packBinary(_fields_pool[i].key.data(), _fields_pool[i].key.size());
+				wire_packer.pack(_fields_pool[i].key.data()[0]);
 				wire_packer.packBinary(_fields_pool[i].value.data(), _fields_pool[i].value.size());
 			}
 		}
@@ -231,7 +232,9 @@ const Bytes& LXMessage::pack() {
 		INFO("  Message will be sent via propagation (" + std::to_string(_packed.size()) + " bytes)");
 	} else if (_desired_method == Type::Message::OPPORTUNISTIC) {
 		// OPPORTUNISTIC: single encrypted packet, no link required
-		if (_packed.size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU) {
+		// Use general ENCRYPTED_PACKET_MDU (not LoRa-specific) since caller
+		// explicitly requested OPPORTUNISTIC — matches Python LXMF behavior
+		if (_packed.size() <= Type::Constants::ENCRYPTED_PACKET_MDU) {
 			_method = Type::Message::OPPORTUNISTIC;
 			_representation = Type::Message::PACKET;
 			INFO("  Message will be sent opportunistically (" + std::to_string(_packed.size()) + " bytes)");
@@ -343,15 +346,16 @@ LXMessage LXMessage::unpack_from_bytes(const Bytes& lxmf_bytes, Type::Message::M
 		DEBUG("  Msgpack map size: " + std::to_string(map_size.size()));
 
 		// Unpack each field (key-value pairs) into temporary storage
+		// Python LXMF packs field keys as integers, values as BIN
 		for (size_t i = 0; i < map_size.size() && temp_fields_count < MAX_FIELDS; ++i) {
-			MsgPack::bin_t<uint8_t> key_bin;
+			uint8_t key_int;
 			MsgPack::bin_t<uint8_t> value_bin;
 
-			unpacker.deserialize(key_bin);
+			unpacker.deserialize(key_int);
 			unpacker.deserialize(value_bin);
 
 			temp_fields[temp_fields_count].in_use = true;
-			temp_fields[temp_fields_count].key = Bytes(key_bin);
+			temp_fields[temp_fields_count].key = Bytes({key_int});
 			temp_fields[temp_fields_count].value = Bytes(value_bin);
 			++temp_fields_count;
 		}
@@ -411,7 +415,7 @@ LXMessage LXMessage::unpack_from_bytes(const Bytes& lxmf_bytes, Type::Message::M
 		repacker.packBinary(content.data(), content.size());
 		repacker.packMapSize(temp_fields_count);
 		for (size_t i = 0; i < temp_fields_count; ++i) {
-			repacker.packBinary(temp_fields[i].key.data(), temp_fields[i].key.size());
+			repacker.pack(temp_fields[i].key.data()[0]);
 			repacker.packBinary(temp_fields[i].value.data(), temp_fields[i].value.size());
 		}
 		payload_for_hash = Bytes(repacker.data(), repacker.size());
@@ -504,7 +508,7 @@ bool LXMessage::validate_signature() {
 	packer.packMapSize(_fields_count);
 	for (size_t i = 0; i < MAX_FIELDS; ++i) {
 		if (_fields_pool[i].in_use) {
-			packer.packBinary(_fields_pool[i].key.data(), _fields_pool[i].key.size());
+			packer.pack(_fields_pool[i].key.data()[0]);
 			packer.packBinary(_fields_pool[i].value.data(), _fields_pool[i].value.size());
 		}
 	}
