@@ -361,8 +361,14 @@ LXMessage MessageStore::load_message(const Bytes& message_hash) {
 
 		// Unpack the message from stored packed bytes
 		// This preserves the exact hash and signature
+		const char* packed_hex = _json_doc["packed"].as<const char*>();
+		if (!packed_hex || packed_hex[0] == '\0') {
+			ERROR("Message file missing packed payload: " + message_path);
+			return LXMessage(Bytes(), Bytes(), Bytes(), Bytes());
+		}
+
 		Bytes packed;
-		packed.assignHex(_json_doc["packed"].as<const char*>());
+		packed.assignHex(packed_hex);
 
 		// Skip signature validation - messages from storage were already validated when received
 		LXMessage message = LXMessage::unpack_from_bytes(packed, LXMF::Type::Message::DIRECT, true);
