@@ -4,8 +4,16 @@
 #include "../Bytes.h"
 
 #include <ArduinoJson.h>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
+#include <memory>
+
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
 
 namespace LXMF {
 
@@ -14,6 +22,7 @@ namespace LXMF {
 	static constexpr size_t MAX_MESSAGES_PER_CONVERSATION = 256;
 	static constexpr size_t MESSAGE_HASH_SIZE = 32;  // SHA256 hash
 	static constexpr size_t PEER_HASH_SIZE = 16;     // Truncated hash
+	static constexpr size_t MESSAGE_PREVIEW_SIZE = 64;
 
 	/**
 	 * @brief Message persistence and conversation management for LXMF
@@ -24,7 +33,9 @@ namespace LXMF {
 	 * Storage structure:
 	 *   <base_path>/
 	 *     conversations.json         - Conversation index
-	 *     messages/<hash>.json       - Individual message files
+	 *     messages/<hash>.m          - Message metadata (content, state, timestamps)
+	 *     messages/<hash>.p          - Packed LXMF payload bytes
+	 *     messages/<hash>.j          - Legacy monolithic file (read/migrate only)
 	 *     conversations/<peer_hash>/ - Per-conversation metadata
 	 *
 	 * Usage:
@@ -50,6 +61,7 @@ namespace LXMF {
 			double last_activity = 0.0;        // Timestamp of most recent message
 			size_t unread_count = 0;           // Number of unread messages
 			uint8_t last_message_hash[MESSAGE_HASH_SIZE];
+			char last_message_preview[MESSAGE_PREVIEW_SIZE];
 
 			// Helper methods for accessing fixed arrays as Bytes
 			RNS::Bytes peer_hash_bytes() const { return RNS::Bytes(peer_hash, PEER_HASH_SIZE); }
@@ -58,6 +70,7 @@ namespace LXMF {
 				return RNS::Bytes(message_hashes[idx], MESSAGE_HASH_SIZE);
 			}
 			RNS::Bytes last_message_hash_bytes() const { return RNS::Bytes(last_message_hash, MESSAGE_HASH_SIZE); }
+			const char* last_message_preview_cstr() const { return last_message_preview; }
 
 			void set_peer_hash(const RNS::Bytes& b) {
 				size_t len = std::min(b.size(), PEER_HASH_SIZE);
@@ -68,6 +81,9 @@ namespace LXMF {
 				size_t len = std::min(b.size(), MESSAGE_HASH_SIZE);
 				memcpy(last_message_hash, b.data(), len);
 				if (len < MESSAGE_HASH_SIZE) memset(last_message_hash + len, 0, MESSAGE_HASH_SIZE - len);
+			}
+			void set_last_message_preview(const std::string& preview) {
+				snprintf(last_message_preview, sizeof(last_message_preview), "%s", preview.c_str());
 			}
 			bool peer_hash_equals(const RNS::Bytes& b) const {
 				if (b.size() != PEER_HASH_SIZE) return false;
@@ -99,6 +115,30 @@ namespace LXMF {
 			 * @brief Clear all data in this conversation info
 			 */
 			void clear();
+		};
+
+		struct ConversationSlot;
+
+		struct ConversationPoolDeleter {
+			bool psram_allocated = false;
+
+			ConversationPoolDeleter() noexcept = default;
+			explicit ConversationPoolDeleter(bool from_psram) noexcept : psram_allocated(from_psram) {}
+
+			void operator()(ConversationSlot* ptr) const noexcept {
+				if (!ptr) {
+					return;
+				}
+#ifdef ARDUINO
+				if (psram_allocated) {
+					heap_caps_free(ptr);
+				} else {
+					std::free(ptr);
+				}
+#else
+				std::free(ptr);
+#endif
+			}
 		};
 
 		/**
@@ -143,6 +183,13 @@ namespace LXMF {
 			bool valid;  // True if loaded successfully
 		};
 
+		struct ConversationSummary {
+			RNS::Bytes peer_hash;
+			double last_activity = 0.0;
+			uint16_t unread_count = 0;
+			std::string last_message_preview;
+		};
+
 	public:
 		/**
 		 * @brief Construct MessageStore
@@ -176,8 +223,9 @@ namespace LXMF {
 		/**
 		 * @brief Load only message metadata (fast path for chat list)
 		 *
-		 * Reads content/timestamp/state directly from JSON without msgpack unpacking.
-		 * Much faster than load_message() for displaying message lists.
+		 * Reads content/timestamp/state directly from compact metadata storage
+		 * without unpacking the LXMF payload. Much faster than load_message()
+		 * for displaying message lists.
 		 *
 		 * @param message_hash Hash of the message to load
 		 * @return MessageMetadata struct (check .valid field)
@@ -236,7 +284,15 @@ namespace LXMF {
 		 * @param peer_hash Hash of the peer
 		 * @return ConversationInfo (or empty if not found)
 		 */
-		ConversationInfo get_conversation_info(const RNS::Bytes& peer_hash);
+		const ConversationInfo* get_conversation_info(const RNS::Bytes& peer_hash) const;
+
+		/**
+		 * @brief Get lightweight summaries for all conversations
+		 *
+		 * Returns conversations sorted by last activity (most recent first) using
+		 * only the in-memory index data needed for list rendering.
+		 */
+		std::vector<ConversationSummary> get_conversation_summaries() const;
 
 		/**
 		 * @brief Get all message hashes for a conversation
@@ -330,6 +386,25 @@ namespace LXMF {
 		std::string get_message_path(const RNS::Bytes& message_hash) const;
 
 		/**
+		 * @brief Get compact metadata path for a message
+		 *
+		 * New-format metadata is stored separately from packed LXMF payload.
+		 */
+		std::string get_message_metadata_path(const RNS::Bytes& message_hash) const;
+
+		/**
+		 * @brief Get packed payload path for a message
+		 */
+		std::string get_message_payload_path(const RNS::Bytes& message_hash) const;
+
+		/**
+		 * @brief Get legacy single-file message path
+		 *
+		 * Used only for backward-compatible reads and migration.
+		 */
+		std::string get_legacy_message_path(const RNS::Bytes& message_hash) const;
+
+		/**
 		 * @brief Get filesystem path for conversation directory
 		 *
 		 * @param peer_hash Hash of the peer
@@ -387,7 +462,7 @@ namespace LXMF {
 
 	private:
 		std::string _base_path;
-		ConversationSlot _conversations_pool[MAX_CONVERSATIONS];
+		std::unique_ptr<ConversationSlot[], ConversationPoolDeleter> _conversations_pool;
 		bool _initialized;
 
 		// Reusable JSON document to reduce heap fragmentation
