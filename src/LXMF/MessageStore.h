@@ -139,6 +139,7 @@ namespace LXMF {
 			double timestamp;
 			bool incoming;
 			int state;  // Type::Message::State as int
+			bool propagated = false;
 			bool valid;  // True if loaded successfully
 		};
 
@@ -193,6 +194,22 @@ namespace LXMF {
 		 * @return True if updated successfully
 		 */
 		bool update_message_state(const RNS::Bytes& message_hash, Type::Message::State state);
+
+		/**
+		 * @brief Update outgoing delivery status in storage
+		 *
+		 * Updates the state and propagated flag together in a single file rewrite.
+		 *
+		 * @param message_hash Hash of the message to update
+		 * @param state New state value
+		 * @param propagated True if accepted by propagation node
+		 * @return True if updated successfully
+		 */
+		bool update_message_delivery_status(
+			const RNS::Bytes& message_hash,
+			Type::Message::State state,
+			bool propagated
+		);
 
 		/**
 		 * @brief Delete a message from storage
@@ -355,6 +372,18 @@ namespace LXMF {
 		 * @return Number of in-use conversation slots
 		 */
 		size_t count_conversations() const;
+
+		/**
+		 * @brief Shared metadata update helper for message JSON files
+		 *
+		 * Updates one or both of the persisted state/propagated fields in a single
+		 * read/modify/write cycle.
+		 */
+		bool update_message_metadata(
+			const RNS::Bytes& message_hash,
+			const Type::Message::State* state,
+			const bool* propagated
+		);
 
 	private:
 		std::string _base_path;

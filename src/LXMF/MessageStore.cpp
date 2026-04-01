@@ -261,6 +261,7 @@ bool MessageStore::save_message(const LXMessage& message) {
 		_json_doc["incoming"] = message.incoming();
 		_json_doc["timestamp"] = message.timestamp();
 		_json_doc["state"] = static_cast<int>(message.state());
+		_json_doc["propagated"] = false;
 
 		// Store content as UTF-8 for fast loading (no msgpack unpacking needed)
 		std::string content_str((const char*)message.content().data(), message.content().size());
@@ -425,6 +426,7 @@ MessageStore::MessageMetadata MessageStore::load_message_metadata(const Bytes& m
 		meta.timestamp = _json_doc["timestamp"] | 0.0;
 		meta.incoming = _json_doc["incoming"] | true;
 		meta.state = _json_doc["state"] | 0;
+		meta.propagated = _json_doc["propagated"] | false;
 		meta.valid = true;
 
 		return meta;
@@ -434,8 +436,11 @@ MessageStore::MessageMetadata MessageStore::load_message_metadata(const Bytes& m
 	}
 }
 
-// Update message state in storage
-bool MessageStore::update_message_state(const Bytes& message_hash, Type::Message::State state) {
+bool MessageStore::update_message_metadata(
+	const Bytes& message_hash,
+	const Type::Message::State* state,
+	const bool* propagated
+) {
 	if (!_initialized) {
 		ERROR("MessageStore not initialized");
 		return false;
@@ -449,14 +454,12 @@ bool MessageStore::update_message_state(const Bytes& message_hash, Type::Message
 	}
 
 	try {
-		// Read existing JSON
 		Bytes data;
 		if (Utilities::OS::read_file(message_path.c_str(), data) == 0) {
 			ERROR("Failed to read message file: " + message_path);
 			return false;
 		}
 
-		// Use reusable document to reduce heap fragmentation
 		_json_doc.clear();
 		DeserializationError error = deserializeJson(_json_doc, data.data(), data.size());
 		if (error) {
@@ -464,10 +467,14 @@ bool MessageStore::update_message_state(const Bytes& message_hash, Type::Message
 			return false;
 		}
 
-		// Update state
-		_json_doc["state"] = static_cast<int>(state);
+		if (state) {
+			_json_doc["state"] = static_cast<int>(*state);
+		}
 
-		// Write back
+		if (propagated) {
+			_json_doc["propagated"] = *propagated;
+		}
+
 		std::string json_str;
 		serializeJson(_json_doc, json_str);
 		if (!Utilities::OS::write_file(message_path.c_str(), Bytes((uint8_t*)json_str.c_str(), json_str.length()))) {
@@ -475,13 +482,34 @@ bool MessageStore::update_message_state(const Bytes& message_hash, Type::Message
 			return false;
 		}
 
-		INFO("Message state updated to " + std::to_string(static_cast<int>(state)));
+		if (state && propagated) {
+			INFO("Message delivery metadata updated: state=" +
+				std::to_string(static_cast<int>(*state)) +
+				", propagated=" + std::string(*propagated ? "true" : "false"));
+		} else if (state) {
+			INFO("Message state updated to " + std::to_string(static_cast<int>(*state)));
+		} else if (propagated) {
+			INFO("Message propagated flag updated to " + std::string(*propagated ? "true" : "false"));
+		}
 		return true;
 
 	} catch (const std::exception& e) {
-		ERROR("Exception updating message state: " + std::string(e.what()));
+		ERROR("Exception updating message metadata: " + std::string(e.what()));
 		return false;
 	}
+}
+
+// Update message state in storage
+bool MessageStore::update_message_state(const Bytes& message_hash, Type::Message::State state) {
+	return update_message_metadata(message_hash, &state, nullptr);
+}
+
+bool MessageStore::update_message_delivery_status(
+	const Bytes& message_hash,
+	Type::Message::State state,
+	bool propagated
+) {
+	return update_message_metadata(message_hash, &state, &propagated);
 }
 
 // Delete message from storage
